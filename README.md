@@ -24,7 +24,7 @@ On top of the functional flows, three quality layers run:
 
 - **Cross-browser** — the functional journeys run on Chromium, Firefox, and WebKit.
 - **Accessibility** — an `axe` scan on the authenticated Account Overview page.
-- **Visual regression** — pixel snapshots of Account Overview and Transaction History.
+- **Visual regression** — pixel snapshots of Account Overview, Transaction History, and the Transfer Funds confirmation page.
 
 ## What the expected results are
 
@@ -70,7 +70,7 @@ Each test layer catches a *different class* of bug. None is redundant; together 
 - **Cannot capture:** pre-existing violations we've deliberately baselined, or a11y issues on pages outside the scan.
 
 ### 4. Visual regression (Chromium-only, masked)
-- **Covers:** Account Overview and Transaction History snapshots.
+- **Covers:** Account Overview, Transaction History, and Transfer Funds confirmation snapshots (three — one above the required minimum, for resilience margin).
 - **Expected to capture:** unintended layout, styling, or structural shifts that functional assertions sail straight past (a button that moved, a broken table, a CSS regression).
 - **Why:** functional correctness ≠ visual correctness; a page can "work" while looking broken.
 - **Cannot capture:** behavioral bugs (a correctly-rendered page can still do the wrong thing), and — by design — differences in the masked dynamic regions. Restricted to Chromium with Linux-generated baselines so cross-engine and local-vs-CI rendering differences don't produce false diffs.
