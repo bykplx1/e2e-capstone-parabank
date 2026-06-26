@@ -1,4 +1,4 @@
-import type { Locator, Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
 import { BasePage } from './BasePage';
 
 /**
@@ -30,10 +30,33 @@ export class LoginPage extends BasePage {
     await this.navigate('index.htm');
   }
 
-  /** Fill the credentials and submit the login form. */
+  /**
+   * Fill the credentials and submit the login form.
+   *
+   * Clicking "Log In" triggers a FULL-PAGE form POST that navigates to
+   * `overview.htm`. We do NOT return the moment the click resolves — that leaves
+   * the navigation in flight and forces every caller to lean on a downstream
+   * assertion to absorb the unsettled load (engine-specific timing luck). On
+   * WebKit in particular this race is real: WebKit commits a full-page
+   * navigation slightly later than Chromium, so an assertion fired immediately
+   * after the click can run against the OLD document (the login page) before the
+   * new one is even committed, or hit a destroyed execution context mid-swap.
+   *
+   * The wait is therefore ENCAPSULATED here, at the page object that owns the
+   * navigation: `waitForURL` blocks until the browser has committed the
+   * `overview.htm` document. This is a web-first wait (it auto-waits on a stable
+   * post-navigation signal — the URL), NOT a fixed `waitForTimeout`, so a fast
+   * engine settles immediately and a slow one simply takes longer — never flaky.
+   */
   async login(username: string, password: string): Promise<void> {
     await this.usernameInput.fill(username);
     await this.passwordInput.fill(password);
     await this.logInButton.click();
+    // Block until the post-login navigation has COMMITTED the overview document,
+    // so callers never assert against an unsettled / pre-navigation page.
+    await this.page.waitForURL(/overview\.htm/);
+    // Belt-and-braces stable post-nav landmark: the overview heading is rendered
+    // by the committed document, confirming we are past the navigation swap.
+    await expect(this.page.getByRole('heading', { name: 'Accounts Overview' })).toBeVisible();
   }
 }

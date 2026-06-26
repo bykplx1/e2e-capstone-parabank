@@ -73,6 +73,16 @@ export class RegisterPage extends BasePage {
   /**
    * Fill every field from a {@link UserFactory} profile and submit. The password
    * is entered into both the password and confirm fields.
+   *
+   * Submitting "Register" triggers a FULL-PAGE form POST that navigates to the
+   * post-registration page (`register.htm` re-rendered with the Welcome panel).
+   * As with login, we encapsulate the post-navigation wait HERE rather than
+   * returning mid-flight and relying on the caller's later assertion to mask an
+   * unsettled load — the same WebKit full-page-navigation race applies (the new
+   * document commits later than on Chromium). `waitForURL` blocks until the
+   * navigation has committed; it is a web-first wait on a stable signal, not a
+   * fixed sleep. The success heading/message are then asserted via
+   * {@link expectRegistered}.
    */
   async register(user: User): Promise<void> {
     await this.firstName.fill(user.firstName);
@@ -87,6 +97,9 @@ export class RegisterPage extends BasePage {
     await this.password.fill(user.password);
     await this.confirmPassword.fill(user.password);
     await this.registerButton.click();
+    // Block until the post-register navigation has COMMITTED, so a caller never
+    // asserts the Welcome state against the still-loading / pre-navigation page.
+    await this.page.waitForURL(/register\.htm/);
   }
 
   /**
