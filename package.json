@@ -10,6 +10,7 @@
   },
   "scripts": {
     "test": "playwright test",
+    "test:unit": "playwright test tests/unit",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write ."
@@ -19,6 +20,7 @@
     "@faker-js/faker": "^10.5.0",
     "@playwright/test": "^1.49.1",
     "@types/node": "^22.10.5",
+    "axe-core": "^4.12.1",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^9.1.0",
     "prettier": "^3.4.2",
