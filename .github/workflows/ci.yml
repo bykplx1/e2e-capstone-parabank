@@ -56,6 +56,24 @@ jobs:
       - name: Install Playwright (chromium + system deps)
         run: pnpm exec playwright install --with-deps chromium
 
+      # TEMP DIAGNOSTIC: dump the actual response from the Dockerized app on
+      # several endpoints so we can see why the login endpoint returns 400.
+      - name: Diagnose ParaBank endpoints
+        run: |
+          sleep 30
+          for path in \
+            "/parabank/index.htm" \
+            "/parabank/services/bank/login/john/demo" \
+            "/parabank/services_proxy/bank/login/john/demo" \
+            "/parabank/services/bank/customers/12212/accounts" ; do
+            echo "===== GET ${path} ====="
+            curl -s -i "http://localhost:8080${path}" | head -20
+            echo
+            echo "----- with Accept: application/json -----"
+            curl -s -i -H 'Accept: application/json' "http://localhost:8080${path}" | head -20
+            echo
+          done
+
       # Layer 2 health gate: even though the service container reports healthy,
       # re-confirm from the job context that the published port serves HTTP 200
       # on the login endpoint before launching the suite. Bounded retries fail
