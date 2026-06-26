@@ -1,5 +1,5 @@
 import { faker } from '@faker-js/faker';
-import type { User } from '../api/types';
+import type { Payee, User } from '../api/types';
 
 /**
  * Builds fresh {@link User} profiles for per-test isolation.
@@ -39,6 +39,27 @@ export class UserFactory {
       username,
       // Faker password can contain symbols; keep it simple and valid.
       password: `Pw${faker.string.alphanumeric(10)}`,
+    };
+  }
+
+  /**
+   * Build a fresh bill-pay {@link Payee} from Faker.
+   *
+   * ParaBank does not pre-register payees — the payee is supplied to `payBill`
+   * at call time — so this is pure throwaway data. `accountNumber` is a numeric
+   * string (the payee's own account, distinct from the paying account).
+   */
+  static makePayee(): Payee {
+    return {
+      name: faker.company.name(),
+      address: {
+        street: faker.location.streetAddress(),
+        city: faker.location.city(),
+        state: faker.location.state({ abbreviated: true }),
+        zipCode: faker.location.zipCode('#####'),
+      },
+      phoneNumber: faker.string.numeric(10),
+      accountNumber: faker.string.numeric(5),
     };
   }
 
