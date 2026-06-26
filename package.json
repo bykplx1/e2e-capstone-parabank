@@ -16,6 +16,7 @@
     "format": "prettier --write ."
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
     "@eslint/js": "^9.18.0",
     "@faker-js/faker": "^10.5.0",
     "@playwright/test": "^1.49.1",
