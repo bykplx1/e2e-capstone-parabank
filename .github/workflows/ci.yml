@@ -4,15 +4,33 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [issue-13-ci-tracer]
+    branches: [main, issue-14-ci-matrix]
   workflow_dispatch:
+    inputs:
+      update_visual_baselines:
+        description: 'Regenerate Linux visual baselines (chromium leg) and commit them back to the branch'
+        type: boolean
+        default: false
+
+# Default read-only; the chromium leg needs write only when committing
+# regenerated Linux visual baselines back to the branch (dispatch path).
+permissions:
+  contents: write
 
 jobs:
-  e2e-chromium:
-    name: E2E (chromium)
+  e2e:
+    name: E2E (${{ matrix.browser }})
     runs-on: ubuntu-latest
 
-    # ParaBank under test, run as a service container alongside the job.
+    strategy:
+      # Three browsers as three PARALLEL jobs (no sharding). One engine failing
+      # should not cancel the others — we want the full per-engine signal.
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+
+    # ParaBank under test, run as a PER-JOB service container alongside each
+    # matrix leg (every browser gets its own fresh container + seed).
     # Layer 1 health gate (Docker): the parasoft/parabank image is built on
     # tomcat:10.1-jre21-temurin-noble and ships WITHOUT curl or wget, so a
     # curl-based --health-cmd can never succeed and the container is reported
@@ -53,8 +71,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright (chromium + system deps)
-        run: pnpm exec playwright install --with-deps chromium
+      - name: Install Playwright (${{ matrix.browser }} + system deps)
+        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
 
       # Layer 2 health gate (workflow). The Docker health-cmd above only proves
       # Tomcat bound the port; it does NOT prove the app is usable. Crucially,
@@ -108,13 +126,43 @@ jobs:
           echo "ParaBank login never returned 200 after seeding." >&2
           exit 1
 
-      - name: Run Playwright tests (chromium)
-        run: pnpm exec playwright test --project=chromium
+      - name: Run Playwright tests (${{ matrix.browser }})
+        run: pnpm exec playwright test --project=${{ matrix.browser }}
+
+      # The `visual` project is Chromium-only (toHaveScreenshot baselines are
+      # rendering-engine specific). Run it as part of the chromium matrix leg,
+      # AFTER the functional run, so the visual regression gate executes and
+      # passes in CI on Linux against the freshly-seeded Docker DB.
+      #
+      # When the workflow is dispatched with update_visual_baselines=true, the
+      # chromium leg regenerates the Linux baselines (--update-snapshots) instead
+      # of asserting against them; a later step commits the new -linux.png files
+      # back to the branch. Normal runs assert without --update-snapshots.
+      - name: Run visual regression (chromium-only, Linux baselines)
+        if: matrix.browser == 'chromium' && github.event.inputs.update_visual_baselines != 'true'
+        run: pnpm exec playwright test --project=visual
+
+      - name: Regenerate Linux visual baselines (dispatch only)
+        if: matrix.browser == 'chromium' && github.event.inputs.update_visual_baselines == 'true'
+        run: pnpm exec playwright test --project=visual --update-snapshots
+
+      - name: Commit regenerated Linux visual baselines
+        if: matrix.browser == 'chromium' && github.event.inputs.update_visual_baselines == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add tests/visual/visual.spec.ts-snapshots/
+          if git diff --cached --quiet; then
+            echo "No baseline changes to commit."
+          else
+            git commit -m "test(visual): add Linux visual baselines generated in CI"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
 
       - name: Upload HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.browser }}
           path: playwright-report/
           retention-days: 7
