@@ -13,15 +13,20 @@ jobs:
     runs-on: ubuntu-latest
 
     # ParaBank under test, run as a service container alongside the job.
-    # Layer 1 health gate: Docker polls the REST login endpoint until the app
-    # finishes booting (the WAR can take 1-2 min to deploy under Tomcat).
+    # Layer 1 health gate (Docker): the parasoft/parabank image is built on
+    # tomcat:10.1-jre21-temurin-noble and ships WITHOUT curl or wget, so a
+    # curl-based --health-cmd can never succeed and the container is reported
+    # unhealthy forever. Instead probe with a bash builtin (/dev/tcp) that the
+    # base image guarantees, confirming Tomcat has bound port 8080. Real
+    # readiness (the WAR deployed and the login endpoint serving 200) is
+    # enforced by the layer-2 workflow poll below.
     services:
       parabank:
         image: parasoft/parabank
         ports:
           - 8080:8080
         options: >-
-          --health-cmd "curl -fsS http://localhost:8080/parabank/services/bank/login/john/demo || exit 1"
+          --health-cmd "bash -c 'echo > /dev/tcp/localhost/8080' || exit 1"
           --health-interval 15s
           --health-timeout 10s
           --health-retries 30
