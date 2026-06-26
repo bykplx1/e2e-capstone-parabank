@@ -78,6 +78,27 @@ Each test layer catches a *different class* of bug. None is redundant; together 
 ### Isolated unit test
 - **`AxeBaselineComparator`** is unit-tested directly, because the logic that decides "new violation vs known violation" is what makes layer 3 trustworthy — a bug there would silently pass or fail a11y regressions.
 
+## A concrete bug — and which layer catches it first
+
+**The bug:** a regression in the transfer endpoint **debits the source account but fails to credit the destination** (the money vanishes). Both pages still render perfectly and the confirmation message still appears.
+
+**Which layer catches it first: the functional E2E flow (layer 1).** The *Transfer funds* test asserts the *resulting balances* — source down by the exact amount **and** destination up by the same amount. The missing credit fails that assertion on the first run, on every engine.
+
+**Why no other layer catches it first:**
+- **Visual regression** would not catch it — the page renders correctly; balances are masked dynamic data, so the snapshot is intentionally blind to the numbers.
+- **Accessibility** would not catch it — the markup is still valid; a wrong balance is not an a11y violation.
+- **Cross-browser** adds nothing here — the bug is in business logic, so it fails identically on all three engines (layer 1 already caught it on each).
+
+This is the point of the layered design: the highest-severity, money-losing bug is caught by the cheapest, most direct assertion, while the other layers stand guard over the failure modes that functional assertions are blind to. A few more bug→first-catcher mappings:
+
+| Hypothetical bug | First layer to catch it |
+|---|---|
+| Transfer debits but doesn't credit | Functional E2E (balance assertion) |
+| Account Overview table collapses on WebKit only | Cross-browser matrix |
+| A new form input ships without a label | Accessibility (axe baseline — new violation) |
+| Nav bar shifts / a button is pushed off-screen by a CSS change | Visual regression |
+| `axe-baseline.json` comparison miscounts a known violation as new | `AxeBaselineComparator` unit test |
+
 ## What we expect to *catch in flight* (the flake story)
 
 Beyond product bugs, the suite is built to expose and document at least one **test-infrastructure flake**. The headline case is a **WebKit post-navigation race**: asserting against a page before WebKit finishes a full-page reload. The fix is encapsulated, web-first waiting (not fixed `waitForTimeout`s), with a single CI retry retained only as a safety net. This is documented as a postmortem — symptom → root cause → fix → prevention — to show the difference between *fixing* flake and *masking* it.
