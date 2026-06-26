@@ -105,13 +105,193 @@ Beyond product bugs, the suite is built to expose and document at least one **te
 
 ---
 
-## Project status & operational docs
+## Running the suite locally
 
-> **Phase 1 in progress.** The sections below will be filled in as the suite is built.
+### Prerequisites
 
-- **Local execution:** _TBD — prerequisites (pnpm, Docker), how to start ParaBank, and how to run the suite._
-- **CI structure:** _TBD — GitHub Actions browser matrix, per-job ParaBank service container with health gate, report artifacts._
-- **State-dependency management:** _TBD — unique-user-per-test isolation and hybrid UI/API seeding._
-- **Retrospective design decision:** _TBD — why unique-user-per-test, and its trade-offs._
+- **Node 22+** (the repo pins `"node": ">=22"` in `package.json`).
+- **pnpm 9.15.9** — pinned via `packageManager`. The easiest path is Corepack:
+  ```bash
+  corepack enable
+  corepack prepare pnpm@9.15.9 --activate
+  ```
+- **Docker** — to run ParaBank locally from the `parasoft/parabank` image.
+
+### 1. Start ParaBank (Docker)
+
+The suite expects ParaBank reachable at `http://localhost:8080`, served under the
+`/parabank` context path. Start the container:
+
+```bash
+docker run -d --name parabank -p 8080:8080 parasoft/parabank
+```
+
+The image boots with an **empty HSQLDB** — the demo data (and the REST spine the
+seeding fixtures depend on) does not exist until you initialize it. Mirror exactly
+what CI does: wait for the webapp to respond, then POST `initializeDB` once and
+poll the login endpoint until it returns `200`.
+
+```bash
+# Wait until Tomcat has deployed the WAR (any non-5xx response will do).
+until [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/parabank/index.htm)" != "000" ]; do
+  echo "waiting for ParaBank..."; sleep 5
+done
+
+# Seed the demo database (idempotent — safe to re-run).
+curl -s -X POST http://localhost:8080/parabank/services/bank/initializeDB
+
+# Confirm the seed took: the demo user must authenticate with HTTP 200.
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/parabank/services/bank/login/john/demo
+# expect: 200
+```
+
+> If `login/john/demo` returns `400`, the database is unseeded — re-run the
+> `initializeDB` POST. This is the single most common local setup gotcha and is
+> the exact failure the CI health gate guards against (see [CI structure](#ci-structure)).
+
+To point the suite at a different instance (e.g. the public demo), override the
+base URL: `PARABANK_URL=https://parabank.parasoft.com pnpm test`. It defaults to
+`http://localhost:8080` (see `playwright.config.ts`).
+
+### 2. Install and run
+
+```bash
+pnpm install --frozen-lockfile
+pnpm exec playwright install --with-deps   # browser binaries (chromium/firefox/webkit)
+
+pnpm test                                   # full suite, all projects (playwright test)
+```
+
+Useful scoped commands (all real `package.json` scripts / Playwright invocations):
+
+| Command | What it runs |
+|---|---|
+| `pnpm test` | The whole suite across every configured project |
+| `pnpm exec playwright test --project=chromium` | Functional journeys on Chromium only (what the CI job runs) |
+| `pnpm exec playwright test --project=firefox` / `--project=webkit` | Cross-browser functional replay |
+| `pnpm exec playwright test --project=visual` | Chromium-only masked visual regression snapshots |
+| `pnpm exec playwright test tests/a11y` | The axe accessibility scan |
+| `pnpm test:unit` | The isolated `AxeBaselineComparator` unit test (`playwright test tests/unit`) |
+| `pnpm typecheck` | `tsc --noEmit` |
+| `pnpm lint` / `pnpm format` | ESLint + Prettier check / Prettier write |
+
+> **Visual baselines are platform-specific.** The committed snapshots under
+> `tests/visual/.../*-snapshots/` are suffixed `-win32` (generated on Windows).
+> Playwright keys screenshots by platform, so on Linux/macOS the `visual` project
+> will report missing baselines until you regenerate them with
+> `pnpm exec playwright test --project=visual --update-snapshots`. CI is intended
+> to own a Linux baseline set (see issue #14) so the gate is deterministic there.
+
+## CI structure
+
+CI is defined in `.github/workflows/ci.yml` and runs on pull requests to `main`
+(plus `workflow_dispatch`). It currently lands as a **single-browser tracer**
+(Chromium) per issue #13; the **target structure (issue #14)** fans this exact job
+template out into a **3-browser matrix** (Chromium, Firefox, WebKit). The design is
+matrix-ready because each browser is functionally independent.
+
+**Per-job ParaBank service container.** Each job runs `parasoft/parabank` as a
+GitHub Actions service container on port 8080 — one fresh, isolated ParaBank per
+job, so matrix shards never share state.
+
+**Two-layer health gate.** ParaBank is unusually awkward to gate on, and the
+workflow handles it in two layers:
+
+1. **Docker health-cmd (port bind).** The `parasoft/parabank` image ships
+   *without* `curl` or `wget`, so a curl-based `--health-cmd` can never pass.
+   Instead the container probes itself with a bash builtin
+   (`echo > /dev/tcp/localhost/8080`) to confirm Tomcat has bound the port.
+2. **Workflow readiness poll + seed.** Binding the port does *not* mean the app is
+   usable: the container boots with an empty HSQLDB, so `login/john/demo` returns
+   `400` and `/index.htm` redirects to `initializeDB.htm`. The workflow therefore
+   waits for the webapp to respond, **POSTs `initializeDB`** to seed the demo data,
+   and **polls `login/john/demo` until it returns `200`** before any test starts.
+   Re-seeding is idempotent and retried in case the first POST races boot.
+
+Only after the seed is confirmed does the job run
+`pnpm exec playwright test --project=chromium`.
+
+**Report artifacts.** The HTML report (`playwright-report/`) is uploaded with
+`actions/upload-artifact` on `if: always()` (7-day retention) so a failing run's
+report — including traces and screenshots — is downloadable. Traces are captured
+`on-first-retry`, screenshots `only-on-failure`, and video `retain-on-failure`
+(see `playwright.config.ts`).
+
+## State-dependency management
+
+ParaBank is a stateful banking app: tests change balances, open accounts, and pay
+bills. Shared mutable state is the classic source of order-dependent flake. This
+suite removes that dependency in two ways.
+
+**Unique user per test.** Every test gets its own freshly registered customer.
+`UserFactory.makeUser()` (`src/support/UserFactory.ts`) builds a profile from Faker
+but owns *username uniqueness itself* — ParaBank rejects duplicates and silently
+misreports non-alphanumeric usernames as "already exists". The username is composed
+from a process-wide monotonic counter (rules out same-process collisions) plus a
+millisecond timestamp and an 8-char random suffix (rules out cross-process ones),
+all kept strictly alphanumeric.
+
+**Hybrid UI/API seeding.** Setup state is created through ParaBank's REST API; only
+the behavior under test runs through the UI. This lives in the fixtures in
+`src/fixtures/test.ts`:
+
+- `api` — a `ParaBankApiClient` bound to a **per-test** `APIRequestContext`, so
+  each worker's cookies (notably the registration `JSESSIONID`) stay isolated.
+- `registeredUser` — registers a fresh user via form-POST, then returns the
+  server's view (customer id + accounts) so dependent tests start fully onboarded.
+- `authenticatedPage` — a **real UI form login** for that user (genuine
+  server-side `JSESSIONID`, *not* an injected token), landing on Account Overview.
+- `userWithTwoAccounts`, `fundedAccount`, `userWithPayee` — composed seeds for the
+  Transfer (#6), Request Loan (#7), and Pay Bill (#8) journeys, each opening/funding
+  state via the API client and ensuring the browser is logged in as the same user.
+
+The `ParaBankApiClient` is a deep module: a plain banking surface
+(`register`/`login`/`createAccount`/`transfer`/`requestLoan`/`payBill`) hiding
+ParaBank's quirks (the GET-then-POST registration handshake, JSON-vs-plaintext
+responses, query-param-vs-body asymmetries). The result is fast, deterministic
+setup with each test asserting one real journey through the UI.
+
+## Retrospective design decision: unique-user-per-test
+
+**Decision.** Rather than seed one shared demo customer and reuse it across the
+suite, each test registers and operates on its own brand-new user, seeded via the
+API. This is the load-bearing reliability choice.
+
+**Why.** ParaBank balances and account lists are mutable and persistent. A shared
+user makes assertions order-dependent: a transfer test asserting "balance went up
+by \$X" breaks the moment another test (or a re-run) has already moved money. With
+`fullyParallel: true`, shared state would also race across workers. Owning a fresh
+user per test makes every assertion absolute, not relative to whatever ran before —
+so a red result means a real defect, not test cross-talk.
+
+**Honest trade-offs:**
+
+- **Setup cost.** Every test pays for a registration + login + account setup
+  round-trip. Doing this through the **API** rather than the UI keeps it cheap, but
+  it is not free — the suite is heavier than one that reuses a logged-in session.
+- **No durable fixtures across runs.** ParaBank's container/DB accumulates users;
+  on the ephemeral CI container that is harmless (fresh DB per job), but a
+  long-lived local instance slowly fills with throwaway customers.
+- **Username uniqueness is hand-rolled.** We can't lean on Faker for the one field
+  that must never collide, so `UserFactory` carries bespoke counter+timestamp+random
+  logic — more code to maintain, but the alternative (intermittent duplicate-user
+  failures under parallelism) is exactly the flake class this design exists to kill.
+- **It does not cover multi-user interactions.** Isolation is the point, so any
+  genuinely cross-customer scenario would need a deliberately different fixture.
+
+The trade is accepted deliberately: a modest, parallel-friendly setup cost buys
+deterministic, order-independent, parallel-safe tests.
+
+## The flake story
+
+Beyond product bugs, the suite is engineered to expose and *document* test-infra
+flake rather than paper over it. The headline case is a **WebKit post-navigation
+race** — asserting against a page before WebKit settles a full-page reload — fixed
+with encapsulated web-first waits on a stable post-navigation locator (not fixed
+`waitForTimeout`s), with the single CI retry (`retries: 1`) kept only as a safety
+net. The full symptom → root cause → fix → prevention write-up lives in
+[`docs/flake-postmortem.md`](docs/flake-postmortem.md).
+
+---
 
 See [issue #1](https://github.com/bykplx1/e2e-capstone-parabank/issues/1) for the full PRD.
