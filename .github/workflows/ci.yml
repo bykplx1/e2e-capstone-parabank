@@ -56,42 +56,56 @@ jobs:
       - name: Install Playwright (chromium + system deps)
         run: pnpm exec playwright install --with-deps chromium
 
-      # TEMP DIAGNOSTIC: dump the actual response from the Dockerized app on
-      # several endpoints so we can see why the login endpoint returns 400.
-      - name: Diagnose ParaBank endpoints
+      # Layer 2 health gate (workflow). The Docker health-cmd above only proves
+      # Tomcat bound the port; it does NOT prove the app is usable. Crucially,
+      # the parasoft/parabank image boots with an EMPTY HSQLDB: the demo user
+      # john/demo (customer #12212) does not exist until the DB is seeded, so
+      # GET .../bank/login/john/demo returns "400 Invalid username and/or
+      # password" and /index.htm 302-redirects to /initializeDB.htm. The public
+      # demo instance is pre-seeded; the fresh container is not. So we:
+      #   1) wait for the webapp to actually respond,
+      #   2) POST .../services/bank/initializeDB once to seed the demo data,
+      #   3) poll the login endpoint until it returns HTTP 200 (proves the seed
+      #      took and the suite's API spine will work) before starting tests.
+      - name: Wait for ParaBank and seed the demo database
         run: |
-          sleep 30
-          for path in \
-            "/parabank/index.htm" \
-            "/parabank/services/bank/login/john/demo" \
-            "/parabank/services_proxy/bank/login/john/demo" \
-            "/parabank/services/bank/customers/12212/accounts" ; do
-            echo "===== GET ${path} ====="
-            curl -s -i "http://localhost:8080${path}" | head -20
-            echo
-            echo "----- with Accept: application/json -----"
-            curl -s -i -H 'Accept: application/json' "http://localhost:8080${path}" | head -20
-            echo
-          done
+          base="http://localhost:8080/parabank"
 
-      # Layer 2 health gate: even though the service container reports healthy,
-      # re-confirm from the job context that the published port serves HTTP 200
-      # on the login endpoint before launching the suite. Bounded retries fail
-      # the job loudly rather than letting tests flake against a half-booted app.
-      - name: Wait for ParaBank to be ready
-        run: |
-          echo "Polling ParaBank login endpoint until HTTP 200..."
+          echo "Waiting for the ParaBank webapp to respond..."
+          up=0
           for attempt in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' \
-              http://localhost:8080/parabank/services/bank/login/john/demo || echo "000")
-            echo "Attempt ${attempt}: HTTP ${code}"
-            if [ "${code}" = "200" ]; then
-              echo "ParaBank is ready."
-              exit 0
+            code=$(curl -s -o /dev/null -w '%{http_code}' "${base}/index.htm" || echo "000")
+            echo "Webapp probe attempt ${attempt}: HTTP ${code}"
+            # Any real HTTP response (200/302/4xx) means Tomcat deployed the WAR.
+            if [ "${code}" != "000" ] && [ "${code}" != "502" ] && [ "${code}" != "503" ]; then
+              up=1
+              break
             fi
             sleep 10
           done
-          echo "ParaBank did not become ready in time." >&2
+          if [ "${up}" != "1" ]; then
+            echo "ParaBank webapp never responded." >&2
+            exit 1
+          fi
+
+          echo "Seeding the demo database (POST initializeDB)..."
+          seed=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/services/bank/initializeDB" || echo "000")
+          echo "initializeDB returned HTTP ${seed}"
+
+          echo "Polling login endpoint until HTTP 200..."
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              "${base}/services/bank/login/john/demo" || echo "000")
+            echo "Login probe attempt ${attempt}: HTTP ${code}"
+            if [ "${code}" = "200" ]; then
+              echo "ParaBank is ready and seeded."
+              exit 0
+            fi
+            # Re-seeding is idempotent; retry it in case the first POST raced boot.
+            curl -s -o /dev/null -X POST "${base}/services/bank/initializeDB" || true
+            sleep 10
+          done
+          echo "ParaBank login never returned 200 after seeding." >&2
           exit 1
 
       - name: Run Playwright tests (chromium)
